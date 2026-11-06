@@ -3,9 +3,10 @@
  * RST Editor for StrictDoc
  *
  * - Keeps the StrictDoc contenteditable element in its original DOM position.
- * - Places table highlights in a fixed overlay under document.body.
+ * - Places table and images highlights in a fixed overlay under document.body.
  * - Supports editing reStructuredText grid tables.
  * - Adds a toolbar for inserting tables.
+ * - Adds buttons above each image to ajust alignment.
  * - Initializes editor for dynamically inserted StrictDoc fields.
  */
 
@@ -30,6 +31,7 @@ class RSTEditor {
         };
 
         this.elements = [];
+        this.images = [];
         this.activeElement = null;
 
         this.editorWindow = null;
@@ -325,6 +327,50 @@ class RSTEditor {
         };
     }
 
+    _parseImage(lines, startLine, endLine) {
+        const directive = lines
+            .slice(startLine, endLine + 1)
+            .find(line => /^\s*\.\.\s+image::/.test(line));
+
+        if (!directive) return null;
+
+        const url = directive
+            .replace(/^\s*\.\.\s+image::\s*/, "")
+            .trim();
+
+        if (!url) return null;
+
+        const classLine = lines
+            .slice(startLine, endLine + 1)
+            .find(line => /^\s*:class:\s*([^\s]+)\s*$/i.test(line));
+
+        const className = classLine
+            ? classLine.match(/^\s*:class:\s*([^\s]+)\s*$/i)[1].toLowerCase()
+            : "";
+
+        const alignmentLine = lines
+            .slice(startLine, endLine + 1)
+            .find(line => /^\s*:align:\s*(left|right|center)\s*$/i.test(line));
+
+
+        const alignment = alignmentLine
+            ? alignmentLine.match(/^\s*:align:\s*(left|right|center)\s*$/i)[1].toLowerCase()
+            : "center";
+
+        let type="image"
+
+        return {
+            startLine,
+            endLine,
+            headers: [],
+            data: [],
+            highlight: null,
+            type: type,
+            url,
+            alignment
+        };
+    }
+
     refresh() {
         if (this.destroyed) return;
 
@@ -358,6 +404,34 @@ class RSTEditor {
                 this._parseTable(lines, first, last)
             )
             .filter(Boolean);
+
+        // Detect image directives and include their option lines.
+        const imageRanges = [];
+        start = -1;
+
+        for (let i = 0; i < lines.length; i++) {
+            if (/^\s*\.\.\s+image::/.test(lines[i])) {
+                if (start === -1) start = i;
+            } else if (
+                start !== -1 &&
+                /^\s*$/.test(lines[i])
+            ) {
+                imageRanges.push([start, i - 1]);
+                start = -1;
+            }
+        }
+
+        if (start !== -1) {
+            imageRanges.push([start, lines.length - 1]);
+        }
+
+        this.images = imageRanges
+            .map(([first, last]) =>
+                this._parseImage(lines, first, last)
+            )
+            .filter(Boolean);
+
+        this.elements.push(...this.images);
 
         this.elements.forEach((table, index) => {
             table.index = index;
@@ -442,12 +516,103 @@ class RSTEditor {
                 event.preventDefault();
                 this.openEditor(table.index);
             });
+        } else if (table.type.includes("image")) {
+            highlight.title = "Click to edit this diagram";
+
+            const alignmentToolbar = doc.createElement("div");
+            alignmentToolbar.className = "rst-image-alignment-toolbar";
+            Object.assign(alignmentToolbar.style, {
+                position: "absolute",
+                left: "0",
+                top: "-30px",
+                display: "flex",
+                gap: "3px",
+                padding: "3px",
+                background: "#ffffff",
+                border: "1px solid #c8c8c8",
+                borderRadius: "5px",
+                boxShadow: "0 1px 4px rgba(0,0,0,.16)",
+                pointerEvents: "auto",
+                zIndex: "1001"
+            });
+
+            [
+                { value: "left", label: "⇤", title: "Align image left" },
+                { value: "center", label: "↔", title: "Align image center" },
+                { value: "right", label: "⇥", title: "Align image right" }
+            ].forEach(({ value, label, title }) => {
+                const button = doc.createElement("button");
+                button.type = "button";
+                button.textContent = label;
+                button.title = title;
+                button.setAttribute("aria-label", title);
+                button.dataset.alignment = value;
+                Object.assign(button.style, {
+                    width: "25px",
+                    height: "23px",
+                    padding: "0",
+                    border: "1px solid #d0d0d0",
+                    borderRadius: "3px",
+                    background: table.alignment === value ? "#dbeafe" : "#ffffff",
+                    color: "#222222",
+                    cursor: "pointer",
+                    fontSize: "15px",
+                    lineHeight: "1"
+                });
+                button.addEventListener("mouseenter", () => {
+                    if (table.alignment !== value) button.style.background = "#f0f0f0";
+                });
+                button.addEventListener("mouseleave", () => {
+                    button.style.background = table.alignment === value ? "#dbeafe" : "#ffffff";
+                });
+                button.addEventListener("click", event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    this._setImageAlignment(table, value);
+                });
+                alignmentToolbar.appendChild(button);
+            });
+
+            highlight.appendChild(alignmentToolbar);
+
         }
 
         highlight.dataset.tableIndex = String(table.index);
 
         this.overlay.appendChild(highlight);
         table.highlight = highlight;
+    }
+
+    _setImageAlignment(image, alignment) {
+        if (!image || !image.type.includes("image")) return;
+        if (!["left", "right", "center"].includes(alignment)) return;
+
+        const lines = this._getSourceLines();
+        const directiveIndex = lines.findIndex((line, index) =>
+            index >= image.startLine &&
+            index <= image.endLine &&
+            /^\s*\.\.\s+image::/.test(line)
+        );
+
+        if (directiveIndex < 0) return;
+
+        let alignmentIndex = -1;
+        for (let i = directiveIndex + 1; i <= image.endLine && i < lines.length; i++) {
+            if (/^\s*:align:\s*(?:left|right|center)\s*$/i.test(lines[i])) {
+                alignmentIndex = i;
+                break;
+            }
+        }
+
+        if (alignmentIndex >= 0) {
+            const indent = lines[alignmentIndex].match(/^\s*/)[0];
+            lines[alignmentIndex] = `${indent}:align: ${alignment}`;
+        } else {
+            const directiveIndent = lines[directiveIndex].match(/^\s*/)[0];
+            lines.splice(directiveIndex + 1, 0, `${directiveIndent}      :align: ${alignment}`);
+        }
+
+        this._replaceSource(lines.join("\n"));
     }
 
     _removeHighlights() {
@@ -1025,6 +1190,7 @@ class RSTEditor {
         this.wrapper?.remove();
 
         this.elements = [];
+        this.images = [];
         this.activeElement = null;
 
         this.destroyed = true;
