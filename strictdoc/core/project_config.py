@@ -143,6 +143,8 @@ class ProjectConfigDefault:
     DEFAULT_BUNDLE_DOCUMENT_VERSION = "@GIT_VERSION (Git branch: @GIT_BRANCH)"
     DEFAULT_BUNDLE_DOCUMENT_COMMIT_DATE = "@GIT_COMMIT_DATETIME"
     DEFAULT_SECTION_BEHAVIOR = "[SECTION]"
+    DEFAULT_DRAWIO_URL="https://embed.diagrams.net"
+    DEFAULT_DRAWIO_HOST="embed.diagrams.net"
 
 
 def resolve_favicon_variant(
@@ -182,6 +184,8 @@ class ProjectConfig:
         source_root_path: Optional[str] = None,
         include_source_paths: Optional[List[str]] = None,
         exclude_source_paths: Optional[List[str]] = None,
+        drawio_host=ProjectConfigDefault.DEFAULT_DRAWIO_HOST,
+        drawio_url=ProjectConfigDefault.DEFAULT_DRAWIO_URL,
         grammars: Optional[Dict[str, str]] = None,
         test_report_root_dict: Optional[Dict[str, str]] = None,
         source_nodes: Optional[List[SourceNodesEntry]] = None,
@@ -260,6 +264,8 @@ class ProjectConfig:
         dir_for_sdoc_cache = os.path.join(dir_for_sdoc_cache, __version__)
 
         self.dir_for_sdoc_cache: str = dir_for_sdoc_cache
+        self.drawio_host: str=drawio_host
+        self.drawio_url: str=drawio_url
 
         #
         # project_features
@@ -1377,6 +1383,8 @@ class ProjectConfigLoader:
         source_root_path = None
         include_source_paths: List[str] = []
         exclude_source_paths: List[str] = []
+        drawio_url=ProjectConfigDefault.DEFAULT_DRAWIO_URL
+        drawio_host=ProjectConfigDefault.DEFAULT_DRAWIO_HOST
         test_report_root_dict: Dict[str, str] = {}
         source_nodes: List[SourceNodesEntry] = []
         html2pdf_strict: bool = False

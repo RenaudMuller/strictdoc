@@ -5,7 +5,9 @@
  * - Keeps the StrictDoc contenteditable element in its original DOM position.
  * - Places table and images highlights in a fixed overlay under document.body.
  * - Supports editing reStructuredText grid tables.
- * - Adds a toolbar for inserting tables.
+ * - Adds a toolbar for inserting tables and drawio diagrams.
+ * - Allows editing existing Draw.io diagrams in browser.
+ * - Supports configurable Draw.io URLs, including self-hosted instances.
  * - Adds buttons above each image to ajust alignment.
  * - Initializes editor for dynamically inserted StrictDoc fields.
  */
@@ -37,6 +39,10 @@ class RSTEditor {
         this.editorWindow = null;
         this.contextMenu = null;
         this.destroyed = false;
+
+        this.drawioHandler = null;
+        this.drawioWindow = null;
+        this._drawioCloseWatcher = null;
 
         this._resizeObserver = null;
         this._dragCleanup = null;
@@ -340,6 +346,11 @@ class RSTEditor {
 
         if (!url) return null;
 
+        // Convert the PNG/SVG asset path into its corresponding Draw.io path.
+        const sourceUrl = url
+            .replace(/[?#].*$/, "")
+            .replace(/\.(?:png|svg)$/i, ".drawio");
+
         const classLine = lines
             .slice(startLine, endLine + 1)
             .find(line => /^\s*:class:\s*([^\s]+)\s*$/i.test(line));
@@ -359,6 +370,9 @@ class RSTEditor {
 
         let type="image"
 
+        if(className=="drawio")
+            type="drawio-image";
+
         return {
             startLine,
             endLine,
@@ -367,6 +381,7 @@ class RSTEditor {
             highlight: null,
             type: type,
             url,
+            sourceUrl,
             alignment
         };
     }
@@ -493,6 +508,42 @@ class RSTEditor {
             }));
     }
 
+    refreshImage(table, fullPath) {
+        const index = this.elements.findIndex(
+            item => item.sourceUrl === table.sourceUrl
+        );
+
+        if (index === -1) {
+            console.warn("Diagram image not found:", table.sourceUrl);
+            return -1;
+        }
+
+        const targetTable = this.elements[index];
+        const lines = this._getSourceLines();
+        const timestamp = Math.floor(Date.now() / 1000);
+
+        for (
+            let i = targetTable.startLine;
+            i <= targetTable.endLine && i < lines.length;
+            i++
+        ) {
+            if (!/^\s*\.\.\s*image::\s+/.test(lines[i])) {
+                continue;
+            }
+
+            lines[i] = lines[i].replace(
+                /(\.\.\s*image::\s+)(\S+)/,
+                (match, directive, url) => {
+                    const cleanUrl = url.replace(/[?#].*$/, "");
+                    return `${directive}${fullPath}?v=${timestamp}`;
+                }
+            );
+        }
+
+        this._replaceSource(lines.join("\n"));
+        return index;
+    }
+
     /* --------------------------------------------------
        Highlight creation and positioning
     -------------------------------------------------- */
@@ -574,7 +625,12 @@ class RSTEditor {
             });
 
             highlight.appendChild(alignmentToolbar);
-
+                highlight.addEventListener("click", event => {
+                    if(table.type=="drawio-image") {
+                        if (event.target.closest(".rst-image-alignment-toolbar")) return;
+                        this._openDrawio(table);
+                    }
+                });
         }
 
         highlight.dataset.tableIndex = String(table.index);
@@ -782,6 +838,294 @@ class RSTEditor {
         }
     }
 
+    /* --------------------------------------------------
+       diagrams.net integration
+    -------------------------------------------------- */
+
+    _openDrawio(table) {
+        const win = this.textarea.ownerDocument.defaultView;
+        if (!win) return;
+
+        if (this.drawioHandler) {
+            win.removeEventListener("message", this.drawioHandler);
+            this.drawioHandler = null;
+        }
+
+        if (this._drawioCloseWatcher !== null) {
+            win.clearInterval(this._drawioCloseWatcher);
+            this._drawioCloseWatcher = null;
+        }
+
+        if (this.drawioWindow && !this.drawioWindow.closed) {
+            this.drawioWindow.close();
+        }
+
+        const drawWin = win.open(
+            drawio_url()+"?embed=1&proto=json",
+            "drawio",
+            "width=1400,height=900,left=100,top=100,resizable=yes"
+        );
+
+        if (!drawWin) {
+            console.error(
+                "The diagrams.net popup was blocked by the browser."
+            );
+            return;
+        }
+
+        this.drawioWindow = drawWin;
+
+        const editable = this.textarea;
+        let processingSave = false;
+
+        const getUploadUrl = () => {
+            const form = editable.closest("form");
+
+            const documentMid = form
+                ?.querySelector('[name="document_mid"]')
+                ?.value;
+
+            const requirementMid = form
+                ?.querySelector('[name="requirement_mid"]')
+                ?.value;
+
+            if (!documentMid || !requirementMid) {
+                throw new Error(
+                    "Missing document_mid or requirement_mid."
+                );
+            }
+
+            return (
+                application_base_url()+"/actions/document/upload_asset" +
+                `?document_mid=${encodeURIComponent(documentMid)}` +
+                `&requirement_mid=${encodeURIComponent(requirementMid)}`
+            );
+        };
+
+        const uploadFile = async file => {
+            const formData = new FormData();
+            formData.append("uploaded_files", file);
+
+            const response = await fetch(getUploadUrl(), {
+                method: "POST",
+                body: formData
+            });
+
+            const body = await response.text();
+
+            if (!response.ok) {
+                throw new Error(
+                    `Asset upload failed (${response.status}): ${body}`
+                );
+            }
+
+
+            return body;
+        };
+
+        const uploadPng = async dataUrl => {
+            const match = /^data:image\/png;base64,(.+)$/i.exec(dataUrl);
+
+            if (!match) {
+                throw new Error(
+                    "diagrams.net did not return a PNG data URL."
+                );
+            }
+
+            const binary = atob(match[1]);
+
+            const bytes = Uint8Array.from(
+                binary,
+                char => char.charCodeAt(0)
+            );
+
+            const filename = (
+                table.sourceUrl.split("/").pop() || "diagram.drawio"
+            ).replace(/\.drawio$/i, ".png");
+
+            const file = new File(
+                [bytes],
+                filename,
+                { type: "image/png" }
+            );
+
+            let body=await uploadFile(file);
+const parsed = JSON.parse(body);
+const imagePaths = Object.values(parsed.images);
+
+console.log(imagePaths[0]);
+// ./_assets/REQ-1/drawio_diagram_1792286174.png
+
+
+            console.log("Diagram PNG uploaded:", filename);
+
+            // Refresh the image directive after the PNG upload succeeds.
+            this.refreshImage(table,imagePaths[0]);
+        };
+
+        const cleanup = () => {
+            win.removeEventListener("message", handler);
+
+            if (this._drawioCloseWatcher !== null) {
+                win.clearInterval(this._drawioCloseWatcher);
+                this._drawioCloseWatcher = null;
+            }
+
+            if (this.drawioHandler === handler) {
+                this.drawioHandler = null;
+            }
+        };
+
+        const handler = async event => {
+            // Accept messages only from this popup and the expected origin.
+            console.log(event);
+            if (event.source !== drawWin) return;
+
+            console.log("GRANTED1"+drawio_url()) ;
+            if (event.origin !== drawio_url()) return;
+            console.log("GRANTED") ;
+
+            let msg;
+
+            try {
+                msg = typeof event.data === "string"
+                    ? JSON.parse(event.data)
+                    : event.data;
+            } catch {
+                return;
+            }
+
+            try {
+                if (msg.event === "configure") {
+                    drawWin.postMessage(
+                        JSON.stringify({
+                            action: "configure",
+                            config: {
+                                defaultFonts: ["Helvetica"]
+                            }
+                        }),
+                        drawio_url()
+                    );
+
+                    return;
+                }
+
+                if (msg.event === "init") {
+                    let xml;
+
+                    try {
+
+                        const response = await fetch(table.sourceUrl+"?v="+String(Math.floor(Date.now() / 1000)));
+
+                        if (response.status === 404) {
+                            xml =
+                                '<mxfile host="'+drawio_host()+'">' +
+                                "<diagram></diagram>" +
+                                "</mxfile>";
+                        } else {
+                            if (!response.ok) {
+                                throw new Error(
+                                    `Failed to load diagram: ${response.status}`
+                                );
+                            }
+
+                            xml = await response.text();
+                        }
+                    } catch (error) {
+                        console.error(
+                            "Failed to load Draw.io asset:",
+                            error
+                        );
+                        return;
+                    }
+
+                    drawWin.postMessage(
+                        JSON.stringify({
+                            action: "load",
+                            xml
+                        }),
+                        drawio_url()
+                    );
+
+                    return;
+                }
+
+                if (msg.event === "save" && !processingSave) {
+                    processingSave = true;
+
+                    try {
+                        const xml = msg.xml;
+
+                        const filename =
+                            table.sourceUrl.split("/").pop() ||
+                            "diagram.drawio";
+
+                        const file = new File(
+                            [xml],
+                            filename,
+                            {
+                                type: "application/vnd.jgraph.mxfile"
+                            }
+                        );
+
+                        await uploadFile(file);
+
+                        console.log("Draw.io XML uploaded.");
+
+                        // Ask diagrams.net to export the updated PNG.
+                        drawWin.postMessage(
+                            JSON.stringify({
+                                action: "export",
+                                format: "png",
+                                xml: true,
+                                transparent: true
+                            }),
+                            drawio_url()
+                        );
+                    } catch (error) {
+                        console.error(
+                            "Draw.io XML upload failed:",
+                            error
+                        );
+
+                        processingSave = false;
+                    }
+
+                    return;
+                }
+
+                if (msg.event === "export" && msg.data) {
+                    await uploadPng(msg.data);
+                    processingSave = false;
+                    return;
+                }
+
+                if (msg.event === "exit") {
+                    cleanup();
+
+                    if (!drawWin.closed) {
+                        drawWin.close();
+                    }
+                }
+            } catch (error) {
+                console.error(
+                    "Error processing diagrams.net message:",
+                    error
+                );
+
+                processingSave = false;
+            }
+        };
+
+        this.drawioHandler = handler;
+        win.addEventListener("message", handler);
+
+        this._drawioCloseWatcher = win.setInterval(() => {
+            if (drawWin.closed) {
+                cleanup();
+            }
+        }, 500);
+    }
 
     /* --------------------------------------------------
        Floating table editor
@@ -1183,6 +1527,20 @@ class RSTEditor {
         this._dragCleanup?.();
         this._dragCleanup = null;
 
+        if (this.drawioHandler) {
+            win?.removeEventListener("message", this.drawioHandler);
+            this.drawioHandler = null;
+        }
+
+        if (this._drawioCloseWatcher !== null) {
+            win?.clearInterval(this._drawioCloseWatcher);
+            this._drawioCloseWatcher = null;
+        }
+
+        if (this.drawioWindow && !this.drawioWindow.closed) {
+            this.drawioWindow.close();
+        }
+
         /*
          * Critical: do not move the StrictDoc editable element,
          * restore its position, or overwrite its inline styles.
@@ -1533,7 +1891,57 @@ function addStatementIcons() {
             run: () => {
                 showTablePicker();
             }
-        }
+        },
+        {
+            icon: "🔷",
+            title: "Insert a diagrams.net image directive",
+            run: () => {
+                const timestamp = Math.floor(Date.now() / 1000);
+
+                const form = target.closest("form");
+
+                const documentMid = form
+                    ?.querySelector('[name="document_mid"]')
+                    ?.value;
+
+                const requirementMid = form
+                    ?.querySelector('[name="requirement_mid"]')
+                    ?.value;
+
+                if (!documentMid || !requirementMid) {
+                    throw new Error(
+                        "Missing document_mid or requirement_mid."
+                    );
+                }
+
+                let abu="";
+
+                if (typeof application_base_url !== "undefined") {
+                    abu=application_base_url();
+                }
+
+                const text =
+                    "\n\n" +
+                    `.. image:: ${abu}/_assets/drawio_diagram_${timestamp}.png?v=0\n` +
+                    "      :align: center\n" +
+                    "      :class: drawio\n\n";
+
+                insertAtSavedCursor(text);
+            }
+        }/*,
+        {
+            icon: "⟳",
+            title: "Notify StrictDoc of the current content",
+            run: () => {
+                target.dispatchEvent(
+                    new InputEvent("input", {
+                        bubbles: true,
+                        inputType: "insertText",
+                        data: null
+                    })
+                );
+            }
+        }*/
     ];
 
     actions.forEach(({ icon, title, run }) => {

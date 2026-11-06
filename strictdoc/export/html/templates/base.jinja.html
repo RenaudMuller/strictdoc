@@ -36,6 +36,15 @@
   {% endif %}
   {% endblock head_custom_css %}
 
+  <script>
+    function drawio_url() {
+        return "{{ drawio_url }}";
+    }
+    function drawio_host() {
+        return "{{ drawio_host }}";
+    }
+  </script>
+
   {% block head_scripts %}
   {# moved to docs templates #}
   {% endblock head_scripts %}

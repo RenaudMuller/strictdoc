@@ -20,6 +20,7 @@ class ImageFormat(Enum):
     JPEG = (".jpeg", "image/jpeg")
     WebP = (".webp", "image/webp")
     AVIF = (".avif", "image/avif")
+    DRAWIO = (".drawio", "application/vnd.jgraph.mxfile")
 
     def __init__(self, extension: str, content_type: str) -> None:
         self.extension = extension

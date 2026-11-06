@@ -315,6 +315,9 @@ def create_main_router(
         strictdoc_last_update=export_action.traceability_index.strictdoc_last_update,
     )
 
+    html_templates.jinja_environment().environment.globals["drawio_url"] = project_config.drawio_url
+    html_templates.jinja_environment().environment.globals["drawio_host"] = project_config.drawio_host
+
     html_generator = HTMLGenerator(project_config, html_templates)
 
     # Server screens contributed by built-in Features (e.g.
